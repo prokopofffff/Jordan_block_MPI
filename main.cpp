@@ -4,7 +4,7 @@
 #include <iostream>
 #include <ctime>
 #include <time.h>
-#include "mpi.h"
+#include <mpi.h>
 
 int main(int argc, char* argv[]){
     MPI_Init(&argc, &argv);
@@ -85,7 +85,7 @@ int main(int argc, char* argv[]){
 
         int task = 7;
         if(rank == 0) {
-            printf("%s : Task = %d Res1 = %e Res2 = %e T1 = %.6f T2 = %.6f S = %d N = %d M = %d\n", 
+            printf("%s : Task = %d Res1 = %e Res2 = %e T1 = %.6f T2 = %.6f S = %d N = %d M = %d\n",
             argv[0], task, r1, r2, t1, t2, s, n, m);
         }
         delete[] A;

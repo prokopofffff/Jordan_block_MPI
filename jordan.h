@@ -3,7 +3,7 @@
 
 #include "funcs.h"
 #include <iostream>
-#include "mpi.h"
+#include <mpi.h>
 #include "matrix.h"
 #include <sys/resource.h>
 #ifdef __linux__
@@ -31,7 +31,5 @@ struct thread_args{
 };
 
 int Jordan(double *A, double *B, double *X, double *C, double *block, double *dop_mat, int n, int m);
-
-void ReduceSum(int p, int* a = nullptr, int n = 0);
 
 #endif
