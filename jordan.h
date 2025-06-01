@@ -15,7 +15,7 @@
 #include <sys/time.h>
 #include <time.h>
 
-struct thread_args{
+struct mpi_args{
     double* A;
     double* B;
     double* C;
@@ -27,9 +27,10 @@ struct thread_args{
     int p;
     double norm;
     int status;
-    int index;
+    int rank;
+    int size;
 };
 
-int Jordan(double *A, double *B, double *X, double *C, double *block, double *dop_mat, int n, int m);
+int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val);
 
 #endif

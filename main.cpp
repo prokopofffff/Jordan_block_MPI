@@ -8,8 +8,9 @@
 
 int main(int argc, char* argv[]){
     MPI_Init(&argc, &argv);
-    int rank;
+    int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
     try{
         if(argc != 5 && argc != 6){
             throw "Incorrect input";
@@ -37,19 +38,36 @@ int main(int argc, char* argv[]){
             }
         }
 
-        matrix_output(A, n, n, r);
+        if(rank == 0){
+            matrix_output(A, n, n, r);
+        }
 
         double *B = new double[n];
         double *X = new double[n];
         double *block = new double[m * m];
         double *C = new double[m * m];
         double *dop_mat = new double[m * m];
+        double norm = A[0];
 
         get_free_memb(A, B, n);
 
+        // mpi_args args;
+        // args.A = A;
+        // args.B = B;
+        // args.block = block;
+        // args.C = C;
+        // args.dop_mat = dop_mat;
+        // args.X = X;
+        // args.n = n;
+        // args.m = m;
+        // args.rank = rank;
+        // args.size = size;
+        // args.norm = norm;
+        // args.status = 0;
+
         double t1 = 0, t2 = 0;
         double t1_start = MPI_Wtime();
-        int flag = Jordan(A, B, X, C, block, dop_mat, n, m);
+        int flag = Jordan(A, B, X, n, m, norm);
         t1 = MPI_Wtime() - t1_start;
 
         if(s == 0){
@@ -73,7 +91,7 @@ int main(int argc, char* argv[]){
 
         double r1 = -1;
         double r2 = -1;
-        if(flag == 1){
+        if(flag == 1 && rank == 0){
             std::cout << std::endl;
             matrix_output(X, 1, n, r);
             std::cout << std::endl;

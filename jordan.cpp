@@ -1,139 +1,157 @@
 #include "jordan.h"
+#include <mpi.h>
 
-// MPI-based reduction (sum)
-void MPIReduceSum(int* a, int* result, int n) {
-    MPI_Allreduce(a, result, n, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-}
-
-// New parallel Jordan function
-int Jordan(double *A, double *B, double *X, double *C, double *block, double *dop_mat, int n, int m) {
+int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val) {
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-    double t_start = MPI_Wtime();
-    double norm = A[0];
 
-    if (rank == 0) {
-        std::cout << "[MPI] Process " << rank << " Jordan() start\n";
-        std::cout << "[MPI] Size " << size << "\n";
-    }
+    int k_div = n / m;
+    int l_rem = n % m;
+    int h_blocks = (l_rem == 0) ? k_div : k_div + 1;
 
-    // Find norm (max element) for stability
-    for(int i = 0; i < n; i++){
-        for(int j = 0; j < n; j++){
-            if(norm < A[i * n + j]) norm = A[i * n + j];
+    double *C_inverse_diag = new double[m * m];
+    double *temp_A_block = new double[m * m];
+    double *temp_product_matrix = new double[m * m];
+    double *temp_B_segment = new double[m];
+    double *A_ir_block_buffer = new double[m*m];
+
+    for (int r = 0; r < h_blocks; ++r) {
+        int r_block_dim = (r == k_div && l_rem != 0) ? l_rem : m;
+        int diag_owner_rank = r % size;
+        int inv_status = 1;
+
+        if (rank == diag_owner_rank) {
+            get_block(A, temp_A_block, n, m, r, r);
+            inv_status = inverse(temp_A_block, C_inverse_diag, r_block_dim, norm_val);
+            set_block(A, temp_A_block, n, m, r, r);
         }
-    }
+        MPI_Bcast(&inv_status, 1, MPI_INT, diag_owner_rank, MPI_COMM_WORLD);
 
-    int k = n / m;
-    int l = n % m;
-    int h = (l == 0 ? k : k + 1);
-
-    // Temporary buffers for block communication
-    double *block_buf = new double[m * m];
-    double *C_buf = new double[m * m];
-    double *dop_buf = new double[m * m];
-    double *X_buf = new double[m];
-
-    for (int r = 0; r < h; r++) {
-        int block_size = (r == k) ? l : m;
-        int diag_owner = r % size;
-        int status = 1;
-        int num_blocks = h; // number of blocks in this row/column
-        int active_procs = std::min(size, num_blocks);
-
-        // 1. Invert diagonal block (only one process does this)
-        if (rank == diag_owner) {
-            get_block(A, block, n, m, r, r);
-            status = inverse(block, C, block_size, norm);
-            set_block(A, block, n, m, r, r);
-        }
-        MPI_Bcast(&status, 1, MPI_INT, diag_owner, MPI_COMM_WORLD);
-        if (status == -1) {
-            delete[] block_buf; delete[] C_buf; delete[] dop_buf; delete[] X_buf;
+        if (inv_status == -1) {
+            delete[] C_inverse_diag; delete[] temp_A_block; delete[] temp_product_matrix; delete[] temp_B_segment; delete[] A_ir_block_buffer;
+            if (rank == 0) fprintf(stderr, "Matrix inversion failed at block %d.\n", r);
             return -1;
         }
-        MPI_Bcast(block, block_size * block_size, MPI_DOUBLE, diag_owner, MPI_COMM_WORLD);
-        MPI_Bcast(C, block_size * block_size, MPI_DOUBLE, diag_owner, MPI_COMM_WORLD);
 
-        // 2. Update B vector (parallel over all processes)
-        for (int i = rank; i < num_blocks; i += size) {
-            if (i == r) {
-                get_vector(B, X, n, m, r);
-                multiply(C, X, dop_mat, block_size, block_size, block_size, 1);
-                set_vector(B, dop_mat, n, m, r);
+        MPI_Bcast(temp_A_block, r_block_dim * r_block_dim, MPI_DOUBLE, diag_owner_rank, MPI_COMM_WORLD);
+        if (rank != diag_owner_rank) {
+            set_block(A, temp_A_block, n, m, r, r);
+        }
+        MPI_Bcast(C_inverse_diag, r_block_dim * r_block_dim, MPI_DOUBLE, diag_owner_rank, MPI_COMM_WORLD);
+
+        if (rank == diag_owner_rank) {
+            get_vector(B, temp_B_segment, n, m, r);
+            multiply(C_inverse_diag, temp_B_segment, temp_product_matrix, r_block_dim, r_block_dim, r_block_dim, 1);
+            set_vector(B, temp_product_matrix, n, m, r);
+        }
+        MPI_Bcast(B + r * m, r_block_dim, MPI_DOUBLE, diag_owner_rank, MPI_COMM_WORLD);
+
+        for (int s_col_task_idx = rank; s_col_task_idx < (h_blocks - (r + 1)); s_col_task_idx += size) {
+            int s = r + 1 + s_col_task_idx;
+            if (s >= h_blocks) continue;
+            int s_block_dim = (s == k_div && l_rem != 0) ? l_rem : m;
+
+            get_block(A, temp_A_block, n, m, r, s);
+            multiply(C_inverse_diag, temp_A_block, temp_product_matrix, r_block_dim, r_block_dim, r_block_dim, s_block_dim);
+            set_block(A, temp_product_matrix, n, m, r, s);
+        }
+
+        for (int s_bcast = r + 1; s_bcast < h_blocks; ++s_bcast) {
+            int s_block_dim_bcast = (s_bcast == k_div && l_rem != 0) ? l_rem : m;
+            int s_col_task_idx_bcast = s_bcast - (r + 1);
+            int ars_owner_rank = s_col_task_idx_bcast % size;
+
+            if (rank == ars_owner_rank) {
+                get_block(A, temp_A_block, n, m, r, s_bcast);
+            }
+            MPI_Bcast(temp_A_block, r_block_dim * s_block_dim_bcast, MPI_DOUBLE, ars_owner_rank, MPI_COMM_WORLD);
+            if (rank != ars_owner_rank) {
+                set_block(A, temp_A_block, n, m, r, s_bcast);
             }
         }
-        MPI_Bcast(B + r * m, block_size, MPI_DOUBLE, diag_owner, MPI_COMM_WORLD);
 
-        // 3. Update row blocks to the right of the diagonal (parallel)
-        int num_row_blocks = h - (r + 1);
-        int row_active_procs = std::min(size, num_row_blocks);
-        for (int s = r + 1 + rank; s < h; s += size) {
-            int block_size_s = (s == k) ? l : m;
-            get_block(A, block, n, m, r, s);
-            multiply(C, block, dop_mat, block_size, block_size, block_size, block_size_s);
-            set_block(A, dop_mat, n, m, r, s);
-        }
-        for (int s = r + 1; s < h; s++) {
-            int block_size_s = (s == k) ? l : m;
-            int block_index = s - (r + 1);
-            int owner = block_index % row_active_procs;
-            get_block(A, block_buf, n, m, r, s);
-            MPI_Bcast(block_buf, block_size * block_size_s, MPI_DOUBLE, owner, MPI_COMM_WORLD);
-            set_block(A, block_buf, n, m, r, s);
-        }
-
-        // 4. Update all other blocks and B (parallel)
-        for (int i = 0; i < h; i++) {
+        for (int i = 0; i < h_blocks; ++i) {
             if (i == r) continue;
-            int block_size_i = (i == k) ? l : m;
-            int num_col_blocks = h - (r + 1);
-            int col_active_procs = std::min(size, num_col_blocks);
-            // Update row blocks
-            for (int j = r + 1 + rank; j < h; j += size) {
-                int block_size_j = (j == k) ? l : m;
-                get_block(A, C_buf, n, m, i, r);
-                get_block(A, block, n, m, r, j);
-                multiply(C_buf, block, dop_mat, block_size_i, block_size, block_size, block_size_j);
-                get_block(A, block, n, m, i, j);
-                subtract(block, dop_mat, block_size_i, block_size_j);
-                set_block(A, block, n, m, i, j);
+            int i_block_dim = (i == k_div && l_rem != 0) ? l_rem : m;
+
+            get_block(A, A_ir_block_buffer, n, m, i, r);
+
+            for (int j_col_task_idx = rank; j_col_task_idx < (h_blocks - (r + 1)); j_col_task_idx += size) {
+                int j = r + 1 + j_col_task_idx;
+                if (j >= h_blocks) continue;
+                int j_block_dim = (j == k_div && l_rem != 0) ? l_rem : m;
+
+                get_block(A, temp_A_block, n, m, r, j);
+                multiply(A_ir_block_buffer, temp_A_block, temp_product_matrix, i_block_dim, r_block_dim, r_block_dim, j_block_dim);
+
+                get_block(A, temp_A_block, n, m, i, j);
+                subtract(temp_A_block, temp_product_matrix, i_block_dim, j_block_dim);
+                set_block(A, temp_A_block, n, m, i, j);
             }
-            for (int j = r + 1; j < h; j++) {
-                int block_size_j = (j == k) ? l : m;
-                int block_index = j - (r + 1);
-                int owner = block_index % col_active_procs;
-                get_block(A, block_buf, n, m, i, j);
-                MPI_Bcast(block_buf, block_size_i * block_size_j, MPI_DOUBLE, owner, MPI_COMM_WORLD);
-                set_block(A, block_buf, n, m, i, j);
+
+            for (int j_bcast = r + 1; j_bcast < h_blocks; ++j_bcast) {
+                int j_block_dim_bcast = (j_bcast == k_div && l_rem != 0) ? l_rem : m;
+                int j_col_task_idx_bcast = j_bcast - (r+1);
+                int aij_owner_rank = j_col_task_idx_bcast % size;
+
+                if (rank == aij_owner_rank) {
+                    get_block(A, temp_A_block, n, m, i, j_bcast);
+                }
+                MPI_Bcast(temp_A_block, i_block_dim * j_block_dim_bcast, MPI_DOUBLE, aij_owner_rank, MPI_COMM_WORLD);
+                if (rank != aij_owner_rank) {
+                    set_block(A, temp_A_block, n, m, i, j_bcast);
+                }
             }
-            // Update B
-            int bcast_owner = (i - (r + 1));
-            int bcast_active_procs = std::min(size, h - (r + 1));
-            bcast_owner = (bcast_owner >= 0) ? (bcast_owner % bcast_active_procs) : 0;
-            if ((i - (r + 1)) >= 0 && ((i - (r + 1)) % bcast_active_procs == rank)) {
-                get_block(A, C_buf, n, m, i, r);
-                get_vector(B, X_buf, n, m, r);
-                multiply(C_buf, X_buf, dop_buf, block_size_i, block_size, block_size, 1);
-                get_vector(B, X_buf, n, m, i);
-                subtract(X_buf, dop_buf, block_size_i, 1);
-                set_vector(B, X_buf, n, m, i);
+
+            int bi_owner_rank;
+            int num_active_procs_for_Bi;
+            if (i < r) {
+                num_active_procs_for_Bi = std::min(size, r);
+                if (num_active_procs_for_Bi > 0) {
+                    bi_owner_rank = i % num_active_procs_for_Bi;
+                } else {
+                     bi_owner_rank = 0;
+                }
+            } else {
+                num_active_procs_for_Bi = std::min(size, h_blocks - (r+1));
+                if (num_active_procs_for_Bi > 0) {
+                    bi_owner_rank = (i - (r+1)) % num_active_procs_for_Bi;
+                } else {
+                    bi_owner_rank = 0;
+                }
             }
-            MPI_Bcast(B + i * m, block_size_i, MPI_DOUBLE, bcast_owner, MPI_COMM_WORLD);
+            if ( (i < r && r == 0) || (i > r && h_blocks - (r+1) == 0) ) {
+                bi_owner_rank = 0;
+            }
+
+
+            if (rank == bi_owner_rank) {
+                get_vector(B, temp_B_segment, n, m, r);
+                multiply(A_ir_block_buffer, temp_B_segment, temp_product_matrix, i_block_dim, r_block_dim, r_block_dim, 1);
+
+                get_vector(B, temp_B_segment, n, m, i);
+                subtract(temp_B_segment, temp_product_matrix, i_block_dim, 1);
+                set_vector(B, temp_B_segment, n, m, i);
+            }
+            MPI_Bcast(B + i * m, i_block_dim, MPI_DOUBLE, bi_owner_rank, MPI_COMM_WORLD);
         }
+
         MPI_Barrier(MPI_COMM_WORLD);
     }
 
-    // Copy solution
     if (rank == 0) {
-        for(int i = 0; i < n; i++){
-            X[i] = B[i];
+        for(int idx = 0; idx < n; ++idx){
+            X_output[idx] = B[idx];
         }
     }
-    MPI_Bcast(X, n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    double t_end = MPI_Wtime();
-    if (rank == 0) printf("[MPI] Process %d Jordan() time: %.6f seconds\n", rank, t_end - t_start);
-    delete[] block_buf; delete[] C_buf; delete[] dop_buf; delete[] X_buf;
+    MPI_Bcast(X_output, n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+    delete[] C_inverse_diag;
+    delete[] temp_A_block;
+    delete[] temp_product_matrix;
+    delete[] temp_B_segment;
+    delete[] A_ir_block_buffer;
+
     return 1;
 }
