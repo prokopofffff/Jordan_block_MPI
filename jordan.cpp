@@ -16,6 +16,8 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
     double *temp_B_segment = new double[m];
     double *A_ir_block_buffer = new double[m*m];
 
+    MPI_Barrier(MPI_COMM_WORLD);
+
     for (int r = 0; r < h_blocks; ++r) {
         int r_block_dim = (r == k_div && l_rem != 0) ? l_rem : m;
         int diag_owner_rank = r % size;
@@ -34,6 +36,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
             return -1;
         }
 
+        MPI_Barrier(MPI_COMM_WORLD);
         MPI_Bcast(temp_A_block, r_block_dim * r_block_dim, MPI_DOUBLE, diag_owner_rank, MPI_COMM_WORLD);
         if (rank != diag_owner_rank) {
             set_block(A, temp_A_block, n, m, r, r);
@@ -45,6 +48,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
             multiply(C_inverse_diag, temp_B_segment, temp_product_matrix, r_block_dim, r_block_dim, r_block_dim, 1);
             set_vector(B, temp_product_matrix, n, m, r);
         }
+        MPI_Barrier(MPI_COMM_WORLD);
         MPI_Bcast(B + r * m, r_block_dim, MPI_DOUBLE, diag_owner_rank, MPI_COMM_WORLD);
 
         for (int s_col_task_idx = rank; s_col_task_idx < (h_blocks - (r + 1)); s_col_task_idx += size) {
@@ -57,6 +61,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
             set_block(A, temp_product_matrix, n, m, r, s);
         }
 
+        MPI_Barrier(MPI_COMM_WORLD);
         for (int s_bcast = r + 1; s_bcast < h_blocks; ++s_bcast) {
             int s_block_dim_bcast = (s_bcast == k_div && l_rem != 0) ? l_rem : m;
             int s_col_task_idx_bcast = s_bcast - (r + 1);
@@ -71,6 +76,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
             }
         }
 
+        MPI_Barrier(MPI_COMM_WORLD);
         for (int i = 0; i < h_blocks; ++i) {
             if (i == r) continue;
             int i_block_dim = (i == k_div && l_rem != 0) ? l_rem : m;
@@ -90,6 +96,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
                 set_block(A, temp_A_block, n, m, i, j);
             }
 
+            MPI_Barrier(MPI_COMM_WORLD);
             for (int j_bcast = r + 1; j_bcast < h_blocks; ++j_bcast) {
                 int j_block_dim_bcast = (j_bcast == k_div && l_rem != 0) ? l_rem : m;
                 int j_col_task_idx_bcast = j_bcast - (r+1);
@@ -104,6 +111,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
                 }
             }
 
+            MPI_Barrier(MPI_COMM_WORLD);
             int bi_owner_rank;
             int num_active_procs_for_Bi;
             if (i < r) {
@@ -140,6 +148,7 @@ int Jordan(double *A, double *B, double *X_output, int n, int m, double norm_val
         MPI_Barrier(MPI_COMM_WORLD);
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) {
         for(int idx = 0; idx < n; ++idx){
             X_output[idx] = B[idx];
